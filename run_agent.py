@@ -33,6 +33,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import List, Tuple, Dict, Any
+from dotenv import load_dotenv
+
 
 import bm25s
 from datasets import load_dataset
@@ -41,12 +43,13 @@ from langchain.prompts import PromptTemplate
 from Stemmer import Stemmer
 from tqdm import tqdm
 
+load_dotenv()
 # ──────────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────────
 MODEL_NAME = "gpt-4.1-mini"
 TEMPERATURE = 0.2
-INDEX_DIR = Path("sports_bm25s_index")
+INDEX_DIR = Path("toys_bm25s_index")
 TOP_KS = [64, 32, 16, 8, 4]        # pool sizes per round
 MAX_PRODUCTS = None                # None → full split; set small for demo
 
@@ -57,7 +60,7 @@ MAX_PRODUCTS = None                # None → full split; set small for demo
 def _iter_products(limit: int | None = None):
     ds = load_dataset(
         "McAuley-Lab/Amazon-Reviews-2023",
-        "raw_meta_Sports_and_Outdoors",
+        "raw_meta_Toys_and_Games",
         split="full",
         trust_remote_code=True,
     )
@@ -79,8 +82,7 @@ def _iter_products(limit: int | None = None):
 def _build_or_load_index(limit: int | None = None):
     """Load cached BM25s index or build it if absent."""
     stemmer = Stemmer("english")
-    tokenizer = bm25s.tokenization.Tokenizer(stemmer=stemmer, stopwords="en")
-
+    tokenizer = bm25s.tokenization.Tokenizer(stemmer=stemmer, stopwords='en')
     if INDEX_DIR.exists():
         print("[+] Loading cached BM25s index…")
         retriever = bm25s.BM25.load(INDEX_DIR, mmap=True, load_corpus=True)
@@ -110,7 +112,7 @@ def _build_or_load_index(limit: int | None = None):
 
 def bm25_search(query: str, idx_tuple, k: int) -> List[Tuple[str, str, float]]:
     _, tok, ret = idx_tuple
-    q_tokens = tok.tokenize(query, update_vocab=False)
+    q_tokens = tok.tokenize([query], update_vocab=False)
     docs_mat, scores_mat = ret.retrieve(q_tokens, k=k)
     docs, scores = docs_mat[0], scores_mat[0]
     return [(d["id"], d["text"], float(s)) for d, s in zip(docs, scores)]

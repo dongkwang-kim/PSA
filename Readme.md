@@ -20,7 +20,7 @@
 The agent utilizes the **Amazon Reviews 2023** dataset from Hugging Face, specifically the Sports & Outdoors category.
 
 - **Dataset**: [McAuley-Lab/Amazon-Reviews-2023](https://huggingface.co/datasets/McAuley-Lab/Amazon-Reviews-2023)
-- **Subset**: `raw_meta_Sports_and_Outdoors`
+- **Subset**: `raw_meta_Toys_and_Games`
 
 ### Data Loading
 
@@ -29,7 +29,7 @@ from datasets import load_dataset
 
 dataset = load_dataset(
     "McAuley-Lab/Amazon-Reviews-2023",
-    "raw_meta_Sports_and_Outdoors",
+    "raw_meta_Toys_and_Games",
     split="full",
     trust_remote_code=True
 )
@@ -65,16 +65,4 @@ export OPENAI_API_KEY="your_openai_api_key"
 
 ```bash
 python run_agent.py
-```
-
-## Example Interaction
-
-```
-User: "I need a tent suitable for winter camping."
-Agent: [Retrieves top-64 results, summarizes them]
-Agent: "Are you looking specifically for tents with insulation or enhanced weather resistance?"
-User: "Enhanced weather resistance."
-Agent: [Retrieves top-32 results based on refined query]
-...
-Agent: [Displays final 4 product options for selection]
 ```
