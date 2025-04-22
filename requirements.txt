@@ -1,0 +1,9 @@
+datasets
+langchain
+openai
+tiktoken
+tqdm
+langchain_community
+bm25s
+numba
+PyStemmer
