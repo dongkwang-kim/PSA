@@ -52,14 +52,13 @@ The retrieval component uses **BM25s**, a sparse retrieval model optimized for t
 ### Dependencies Installation
 
 ```bash
-pip install datasets bm25s[core] langchain openai tiktoken tqdm Stemmer
+pip install -r requirements.txt
 ```
 
 ### Environment Setup
 
 ```bash
 export OPENAI_API_KEY="your_openai_api_key"
-pip install -r requirements.txt
 ```
 
 ### Running the Agent
