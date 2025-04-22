@@ -17,7 +17,7 @@
 
 ## Dataset
 
-The agent utilizes the **Amazon Reviews 2023** dataset from Hugging Face, specifically the Sports & Outdoors category.
+The agent utilizes the **Amazon Reviews 2023** dataset from Hugging Face, specifically Toys_and_Games.
 
 - **Dataset**: [McAuley-Lab/Amazon-Reviews-2023](https://huggingface.co/datasets/McAuley-Lab/Amazon-Reviews-2023)
 - **Subset**: `raw_meta_Toys_and_Games`
