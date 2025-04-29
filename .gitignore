@@ -1,2 +1,3 @@
 .env
 toys_bm25s_index/
+magazines_bm25s_index/
