@@ -28,14 +28,14 @@ class user_simulator:
                 "For example, if the product is a 'Samsung Galaxy S21 silver smartphone with 128GB storage', "
                 "you may return 'Galaxy S21' or 'Samsung smartphone' for example. "
                 "you may use the product title and some features(if any) to generate the query, which is at most two to five words. "
-                "The product title is {meta[title]} and the features are {meta[features]}. "
+                "The product title is {meta[title]} and the features are {meta[features]} and {meta[description]}. "
                 "Please return the query in a single line without any additional text or explanation. "
                 "The query should be a short phrase(2-5 words) and should not contain punctuation or special characters. "
             ),
         )
         # generate the query
         ambiguous_query = ambiguous_query_prompt.format(meta=self.meta)
-        return self.llm.invoke(ambiguous_query).content.strip()
+        return ambiguous_query
 
     def answer_clarification_question(self, question_str):
         """
@@ -51,16 +51,16 @@ class user_simulator:
                 "You are not allowed to return the full name of the product, since we're now simulating a real user query scenario. "
                 "The question is: {question}. "
                 "You may refer to the product title and some features(if any) to answer the question. "
-                "The product title is {meta[title]} and the features are {meta[features]}. "
+                "The product title is {meta[title]} and the features are {meta[features]} and {meta[description]}. "
                 "Please return the answer in a single line without any additional text or explanation. "
             ),
         )
         answer = answer_clarification_question_prompt.format(
             meta=self.meta, question=question_str
         )
-        return self.llm.invoke(answer).content.strip()
+        return answer
 
-    def eval_retrieval(self, retrieved_items, k=4):
+    def eval_retrieval(self, retrieved_items, k=10):
         """
         evaluates the retrieval result
         """
@@ -81,7 +81,7 @@ class user_simulator:
             self.retrieval_reciprocal_rank.append(0)
 
         # we only check the top k items(to compute Hit@k)
-        # in this prototype, we use k=4
+        # in this prototype, we use k=10
         retrieved_items = retrieved_items[:k]
 
         for item in retrieved_items:
@@ -170,16 +170,3 @@ def accumulate_retrieval_result(retrieval_result_list, retrieval_reciprocal_rank
         MRR_per_turn[i] /= MRR_count[i]
 
     return retrieval_result_length, hit_at_k_for_each_turn, MRR_per_turn
-
-
-
-
-# if __name__ == "__main__":
-#     API_KEY = input("Enter your OpenAI API key: ")
-
-#     llm = ChatOpenAI(
-#         model_name="gpt-4o",
-#         temperature=0.2,
-#         api_key = API_KEY,
-#     )
-

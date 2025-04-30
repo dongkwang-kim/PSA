@@ -17,22 +17,24 @@ from sentence_transformers import SentenceTransformer
 from Stemmer import Stemmer
 from tqdm import tqdm
 
+from user_simulator import user_simulator, accumulate_retrieval_result
+
 load_dotenv()
 # ──────────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────────
 MODEL_NAME = "gpt-4.1-mini"
 TEMPERATURE = 0.2
-# INDEX_DIR = Path("toys_bm25s_index")
-INDEX_DIR = Path("magazines_bm25s_index")
-VEC_DIR = INDEX_DIR / "faiss"
-TOP_KS = [10, 10, 10, 4]        # pool sizes per round
+INDEX_DIR = Path("toys_bm25s_index")
+# INDEX_DIR = Path("magazines_bm25s_index")
+VEC_DIR = Path("toys_faiss")
+TOP_KS = [10, 10, 10, 10, 10]        # pool sizes per round
 MAX_PRODUCTS = None                # None → full split; set small for demo
 SEM_K_FACTOR = 2                  # retrieve k*factor from each modality
 HYBRID_WEIGHT = 0.5               # 0.5 lexical + 0.5 semantic
 EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 EMBED_DIM = 384
-
+DEVICE = "mps"
 
 # ──────────────────────────────────────────────────
 # Data loading
@@ -41,8 +43,8 @@ EMBED_DIM = 384
 def _iter_products(limit: int | None = None):
     ds = load_dataset(
         "McAuley-Lab/Amazon-Reviews-2023",
-        # "raw_meta_Toys_and_Games",
-        'raw_meta_Magazine_Subscriptions',
+        "raw_meta_Toys_and_Games",
+        # 'raw_meta_Magazine_Subscriptions',
         split="full",
         trust_remote_code=True,
     )
@@ -99,7 +101,7 @@ def _build_or_load_vector_index(corpus: List[Dict[str, str]]):
         return index, id_map, model
 
     print("[+] Building FAISS vector index (first run — please wait)…")
-    model = SentenceTransformer(EMBED_MODEL_NAME)
+    model = SentenceTransformer(EMBED_MODEL_NAME, device=DEVICE)
     model.max_seq_length = 512
     texts = [d["text"] for d in corpus]
 
@@ -111,6 +113,7 @@ def _build_or_load_vector_index(corpus: List[Dict[str, str]]):
     embeddings = np.vstack(embeddings).astype('float32')
 
     # Build FAISS index (inner product on unit vectors == cosine sim)
+    # use mps for FAISS
     index = faiss.IndexFlatIP(EMBED_DIM)
     index.add(embeddings)
 
@@ -263,8 +266,79 @@ def interactive_loop():
         print("No valid selection. Bye!")
 
 # ──────────────────────────────────────────────────
+# Evaluation chat loop
+# ──────────────────────────────────────────────────
+
+def eval_loop():
+    bm25_idx = _build_or_load_bm25_index(MAX_PRODUCTS)
+    vec_idx = _build_or_load_vector_index(bm25_idx[0])
+    llm = ChatOpenAI(model_name=MODEL_NAME, temperature=TEMPERATURE, streaming=True)
+
+    # Open the test set (jsonl file)
+    eval_data_paths = [
+        Path("./sample_data/toy_sample.jsonl"),
+        # Path("./sample_data/cellphone_sample.jsonl"),
+    ]
+    toy_meta = []
+    cellphone_meta = []
+
+    for path in eval_data_paths:
+        with open(path, "r") as f:
+            for line in f:
+                data = json.loads(line)
+                if path.name == "toy_sample.jsonl":
+                    toy_meta.append(data)
+                elif path.name == "cellphone_sample.jsonl":
+                    cellphone_meta.append(data)
+
+    retrieval_results = []
+    reciprocal_ranks = []
+
+    for meta in tqdm(toy_meta, desc="Evaluating Toy Samples"):
+        user_sim = user_simulator(
+            meta=meta,
+            llm=llm
+        )
+
+        user_query = user_sim.initial_ambiguous_query()
+        print(f"You: {user_query}")
+
+        prev_questions = []
+
+        for k in TOP_KS:
+            hits = hybrid_search(user_query, bm25_idx, vec_idx, k)
+            user_sim.eval_retrieval(hits, k)
+            question = ask_disambiguation(llm, hits, prev_questions)
+            print(f"Agent: {question}")
+            prev_questions.append(question)
+            if question.strip() == "[END]":
+                break
+
+            answer = user_sim.answer_clarification_question(question)
+            print(f"You: {answer}")
+
+            user_query = f"{user_query} {answer}".strip()
+
+        final_hits = hybrid_search(user_query, bm25_idx, vec_idx, 10)
+        user_sim.eval_retrieval(final_hits, 10)
+
+        r, rr = user_sim.get_result()
+        retrieval_results.append(r)
+        reciprocal_ranks.append(rr)
+    
+    lengths, hit_at_k_per_turn, mrr_per_turn = accumulate_retrieval_result(retrieval_results, reciprocal_ranks)
+
+    print("\n\n==================== Evaluation Results ====================")
+    for turn_idx, (hit, mrr) in enumerate(zip(hit_at_k_per_turn, mrr_per_turn)):
+        print(f"Turn {turn_idx + 1}:")
+        print(f"Hit@{TOP_KS[turn_idx]}: {hit:.4f}")
+        print(f"MRR@{TOP_KS[turn_idx]}: {mrr:.4f}")
+
+
+# ──────────────────────────────────────────────────
 if __name__ == "__main__":
     try:
-        interactive_loop()
+        # interactive_loop()
+        eval_loop()
     except KeyboardInterrupt:
         print("\n[Session terminated]")
