@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 from __future__ import annotations
 
 
@@ -25,25 +27,28 @@ load_dotenv()
 # ──────────────────────────────────────────────────
 MODEL_NAME = "gpt-4.1-mini"
 TEMPERATURE = 0.2
-INDEX_DIR = Path("toys_bm25s_index")
+INDEX_DIR = Path("cellphones_bm25s_index")
+# INDEX_DIR = Path("toys_bm25s_index")
 # INDEX_DIR = Path("magazines_bm25s_index")
-VEC_DIR = Path("toys_faiss")
+# VEC_DIR = Path("toys_faiss")
+VEC_DIR = Path("cellphones_faiss")
 TOP_KS = [10, 10, 10, 10, 10]        # pool sizes per round
 MAX_PRODUCTS = None                # None → full split; set small for demo
 SEM_K_FACTOR = 2                  # retrieve k*factor from each modality
 HYBRID_WEIGHT = 0.5               # 0.5 lexical + 0.5 semantic
 EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 EMBED_DIM = 384
-DEVICE = "mps"
+DEVICE = "cuda"
 
 # ──────────────────────────────────────────────────
 # Data loading
 # ──────────────────────────────────────────────────
 
-def _iter_products(limit: int | None = None):
+def _iter_products(limit):
     ds = load_dataset(
         "McAuley-Lab/Amazon-Reviews-2023",
-        "raw_meta_Toys_and_Games",
+        # "raw_meta_Toys_and_Games",
+        "raw_meta_Cell_Phones_and_Accessories",
         # 'raw_meta_Magazine_Subscriptions',
         split="full",
         trust_remote_code=True,
@@ -63,7 +68,7 @@ def _iter_products(limit: int | None = None):
 # Index build / load
 # ──────────────────────────────────────────────────
 
-def _build_or_load_bm25_index(limit: int | None = None):
+def _build_or_load_bm25_index(limit):
     """Load cached BM25s index or build it if absent."""
     stemmer = Stemmer("english")
     tokenizer = bm25s.tokenization.Tokenizer(stemmer=stemmer, stopwords='en')
@@ -87,7 +92,7 @@ def _build_or_load_bm25_index(limit: int | None = None):
     retriever.save(INDEX_DIR, corpus=corpus)
     tokenizer.save_vocab(INDEX_DIR)
     tokenizer.save_stopwords(INDEX_DIR)
-    print(f"[✓] Saved index ({len(corpus):,} docs) → {INDEX_DIR}")
+    # print(f"[✓] Saved index ({len(corpus):,} docs) → {INDEX_DIR}")
     return corpus, tokenizer, retriever
 
 
@@ -276,8 +281,8 @@ def eval_loop():
 
     # Open the test set (jsonl file)
     eval_data_paths = [
-        Path("./sample_data/toy_sample.jsonl"),
-        # Path("./sample_data/cellphone_sample.jsonl"),
+        # Path("./sample_data/toy_sample.jsonl"),
+        Path("./PSA/sample_data/cellphone_sample.jsonl"),
     ]
     toy_meta = []
     cellphone_meta = []
@@ -294,14 +299,14 @@ def eval_loop():
     retrieval_results = []
     reciprocal_ranks = []
 
-    for meta in tqdm(toy_meta, desc="Evaluating Toy Samples"):
+    for meta in tqdm(cellphone_meta, desc="Evaluating CellPhone Samples"):
         user_sim = user_simulator(
             meta=meta,
             llm=llm
         )
 
         user_query = user_sim.initial_ambiguous_query()
-        print(f"You: {user_query}")
+        # print(f"You: {user_query}")
 
         prev_questions = []
 
@@ -309,13 +314,13 @@ def eval_loop():
             hits = hybrid_search(user_query, bm25_idx, vec_idx, k)
             user_sim.eval_retrieval(hits, k)
             question = ask_disambiguation(llm, hits, prev_questions)
-            print(f"Agent: {question}")
+            # print(f"Agent: {question}")
             prev_questions.append(question)
             if question.strip() == "[END]":
                 break
 
             answer = user_sim.answer_clarification_question(question)
-            print(f"You: {answer}")
+            # print(f"You: {answer}")
 
             user_query = f"{user_query} {answer}".strip()
 
@@ -331,8 +336,8 @@ def eval_loop():
     print("\n\n==================== Evaluation Results ====================")
     for turn_idx, (hit, mrr) in enumerate(zip(hit_at_k_per_turn, mrr_per_turn)):
         print(f"Turn {turn_idx + 1}:")
-        print(f"Hit@{TOP_KS[turn_idx]}: {hit:.4f}")
-        print(f"MRR@{TOP_KS[turn_idx]}: {mrr:.4f}")
+        print(f"Hit@{10}: {hit:.4f}")
+        print(f"MRR@{10}: {mrr:.4f}")
 
 
 # ──────────────────────────────────────────────────

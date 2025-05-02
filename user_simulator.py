@@ -64,7 +64,7 @@ class user_simulator:
         """
         evaluates the retrieval result
         """
-        # retrieval_result is a list of tuples, where each tuple contains the id, the description, and the retreival score
+        # retrieval_result is a list of tuples, where each tuple contains the id, the description, and the retrieval score
         # we need to first sort the list by the retrieval score
         retrieved_items = sorted(
             retrieved_items, key=lambda x: x[2], reverse=True
@@ -73,7 +73,7 @@ class user_simulator:
         # first check the rank for MRR
         found = False
         for i, item in enumerate(retrieved_items):
-            if item["id"] == self.meta["id"]:
+            if item[0] == self.meta["parent_asin"]:
                 self.retrieval_reciprocal_rank.append(1/(i + 1))
                 found = True
                 break
@@ -85,8 +85,8 @@ class user_simulator:
         retrieved_items = retrieved_items[:k]
 
         for item in retrieved_items:
-            if item["id"] == self.meta["id"]:
-                self.retreival_result.append(True)
+            if item[0] == self.meta["parent_asin"]:
+                self.retrieval_result.append(True)
                 return
         self.retrieval_result.append(False)
         return
@@ -150,7 +150,7 @@ def accumulate_retrieval_result(retrieval_result_list, retrieval_reciprocal_rank
 
     for i in range(max_length):
         # it is guaranteed that hitmiss[i][0] + hitmiss[i][1] > 0
-        hit_at_k_for_each_turn = hitmiss[i][0] / (hitmiss[i][0] + hitmiss[i][1])
+        hit_at_k_for_each_turn[i] = hitmiss[i][0] / (hitmiss[i][0] + hitmiss[i][1])
 
 
     # We also compute MRR for each turn
