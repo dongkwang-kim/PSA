@@ -20,7 +20,6 @@ import warnings
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 warnings.filterwarnings('ignore')
-from datasets import load_dataset
 from collections import defaultdict
 from user_simulator import user_simulator, accumulate_retrieval_result
 
@@ -32,7 +31,7 @@ TEMPERATURE = 0.2
 # INDEX_DIR = Path("toys_bm25s_index")
 INDEX_DIR = Path("toys_bm25s_index")
 VEC_DIR = Path("toys_faiss")
-TOP_KS = [20, 20, 20, 4]        # pool sizes per round
+TOP_KS = [10, 10, 10, 10]        # pool sizes per round
 MAX_PRODUCTS = None                # None → full split; set small for demo
 SEM_K_FACTOR = 2                  # retrieve k*factor from each modality
 HYBRID_WEIGHT = 0.5               # 0.5 lexical + 0.5 semantic
@@ -326,11 +325,6 @@ def conversational_search(meta, bm25_idx, vec_idx, llm):
     # 대화 이력
     qa_turns: list[tuple[str, str]] = []
 
-    # ──────────────────────────────
-    # Retrieval / Clarification loop
-    # ──────────────────────────────
-    retrieval_results, reciprocal_ranks = [], []   # ⟵ for evaluation
-
     for round_idx, k in enumerate(TOP_KS, start=1):
 
         # Retrieval
@@ -345,30 +339,8 @@ def conversational_search(meta, bm25_idx, vec_idx, llm):
 
         # ───── 마지막 라운드 or [END] 처리
         if question == "[END]" or round_idx == len(TOP_KS):
-            #   ↳ 마지막 iteration: 문서 4개 요약 후 종료
-            final_hits = hybrid_search(search_query, bm25_idx, vec_idx, 4)
-            summary = summarise_docs(llm, [(pid, txt) for pid, txt, _ in final_hits])
-            # print("\n🔎  Top‑4 summary\n" + summary)
-
-            # ★ 최종 라운드 평가(시뮬레이션 전용)
-            if meta is not None:
-                user_sim.eval_retrieval(final_hits, 10)
-                r, rr = user_sim.get_result()
-                return r, rr
-                retrieval_results.append(r)
-                reciprocal_ranks.append(rr)
-
-                # ─── 평가 결과 집계·출력 ───
-                lengths, hit_at_k_per_turn, mrr_per_turn = accumulate_retrieval_result(
-                    retrieval_results, reciprocal_ranks
-                )
-                print("\n\n==================== Evaluation Results ====================")
-                for turn_idx, (hit, mrr) in enumerate(zip(hit_at_k_per_turn,
-                                                          mrr_per_turn)):
-                    print(f"Turn {turn_idx + 1}:")
-                    print(f"Hit@10: {hit:.4f}")
-                    print(f"MRR@10: {mrr:.4f}")
-            return
+            r, rr = user_sim.get_result()
+            return r, rr
 
         # ───── 일반 라운드 처리 (대화 이어가기)
         # print(f"Agent: {question}")
@@ -440,12 +412,5 @@ def batch_evaluate():
 # 3) 스크립트 진입점
 # ─────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    batch_evaluate()          # 메타 기반 자동 평가 실행
-    # conversational_search()  # 사람‑대화 모드로 직접 써보고 싶으면 주석 해제
+    batch_evaluate()
 
-
-# if __name__ == "__main__":
-#     try:
-#         conversational_search()
-#     except KeyboardInterrupt:
-#         print("\n[Session terminated]")
