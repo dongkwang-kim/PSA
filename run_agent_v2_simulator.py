@@ -38,6 +38,8 @@ HYBRID_WEIGHT = 0.5               # 0.5 lexical + 0.5 semantic
 EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 EMBED_DIM = 384
 
+DEVICE = "cuda"
+
 
 def _iter_products(limit: int | None = None):
     # 1) 메타 정보
@@ -122,7 +124,7 @@ def _build_or_load_vector_index(corpus: List[Dict[str, str]]):
         return index, id_map, model
 
     print("[+] Building FAISS vector index (first run — please wait)…")
-    model = SentenceTransformer(EMBED_MODEL_NAME)
+    model = SentenceTransformer(EMBED_MODEL_NAME, device=DEVICE)
     model.max_seq_length = 512
     texts = [d["text"] for d in corpus]
 
@@ -420,5 +422,9 @@ def batch_evaluate():
 # 3) 스크립트 진입점
 # ─────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    batch_evaluate()
+   
+    bm25_idx = _build_or_load_bm25_index(MAX_PRODUCTS)
+    vec_idx  = _build_or_load_vector_index(bm25_idx[0])
+
+    # batch_evaluate()
 
