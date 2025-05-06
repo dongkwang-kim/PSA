@@ -1,0 +1,505 @@
+# -*- coding: utf-8 -*-
+
+from __future__ import annotations
+
+
+import json
+from pathlib import Path
+from typing import List, Tuple, Dict, Any
+from dotenv import load_dotenv
+
+
+import numpy as np
+import faiss
+import bm25s
+from datasets import load_dataset
+from langchain_community.chat_models import ChatOpenAI
+from langchain.prompts import PromptTemplate
+from sentence_transformers import SentenceTransformer
+from Stemmer import Stemmer
+from tqdm import tqdm
+import warnings
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+warnings.filterwarnings('ignore')
+from collections import defaultdict
+from user_simulator import user_simulator, accumulate_retrieval_result
+import re
+
+
+load_dotenv()
+
+EVAL_START_IDX = 0
+EVAL_END_IDX = 49
+
+MODEL_NAME = "gpt-4.1-mini"
+TEMPERATURE = 0.2
+# INDEX_DIR = Path("toys_bm25s_index")
+BASE_DIR = Path(__file__).parent
+INDEX_DIR = Path("toys_bm25s_index")
+VEC_DIR = Path("toys_faiss")
+TOP_KS = [10, 10, 10, 10]        # pool sizes per round
+MAX_PRODUCTS = None                # None → full split; set small for demo
+SEM_K_FACTOR = 2                  # retrieve k*factor from each modality
+HYBRID_WEIGHT = 0.5               # 0.5 lexical + 0.5 semantic
+EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+EMBED_DIM = 384
+
+DEVICE = "cuda"
+
+PHONE_RE = re.compile(r"\b\d{3}-\d{3,4}-\d{4}\b")
+EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+
+with open(BASE_DIR / 'util_data' / 'list_of_dirty_words.txt', "r", encoding='utf-8') as f:
+    dirty_words = [w.strip() for w in f if w.strip()]
+
+dirty_patterns = re.compile(
+    r'\b(?:' + '|'.join(map(re.escape, dirty_words)) + r')\b',
+    re.IGNORECASE
+)
+
+FORBIDDEN_PATTERNS = [
+    PHONE_RE,                     # 전화번호 패턴
+    EMAIL_RE,                     # 이메일
+    dirty_patterns,              # 욕설/비속어 (실제 리스트로 대체)
+]
+
+def is_safe_user_input(text):
+    for pat in FORBIDDEN_PATTERNS:
+        if re.search(pat, text, re.IGNORECASE):
+            return False
+    return True
+
+def is_safe_llm_output(text):
+    for pat in FORBIDDEN_PATTERNS:
+        if re.search(pat, text, re.IGNORECASE):
+            return False
+    return True
+
+
+def _iter_products(limit: int | None = None):
+    # 1) 메타 정보
+    meta_ds = load_dataset(
+        "McAuley-Lab/Amazon-Reviews-2023",
+        "raw_meta_Toys_and_Games",
+        split="full",
+        trust_remote_code=True,
+    )
+
+    # 2) 리뷰 정보 →  parent_asin ➜ [review strings]
+    review_ds = load_dataset(
+        "McAuley-Lab/Amazon-Reviews-2023",
+        "raw_review_Toys_and_Games",
+        split="full",
+        trust_remote_code=True,
+    )
+
+    reviews_by_pid: dict[str, list[str]] = defaultdict(list)
+    for row in review_ds:
+        pid = row["parent_asin"]
+        rv_title = row.get("title") or ""
+        rv_text  = row.get("text")  or ""
+        if rv_title or rv_text:
+            reviews_by_pid[pid].append(f"{rv_title} {rv_text}".strip())
+
+    # 3) 메타 + 리뷰를 합쳐서 반환
+    for i, row in enumerate(meta_ds):
+        if limit and i >= limit:
+            break
+
+        pid      = row["parent_asin"]
+        title    = row.get("title") or ""
+        features = " ".join(row.get("features", [])) if row.get("features") else ""
+        desc     = row.get("description") or ""
+        rv_blob  = " ".join(reviews_by_pid.get(pid, []))
+
+        text = " ".join(filter(None, [str(title), str(features), str(desc), str(rv_blob)]))
+        if text:
+            yield {"id": pid, "text": text}
+
+
+# ──────────────────────────────────────────────────
+# Index build / load
+# ──────────────────────────────────────────────────
+
+def _build_or_load_bm25_index(limit: int | None = None):
+    """Load cached BM25s index or build it if absent."""
+    stemmer = Stemmer("english")
+    tokenizer = bm25s.tokenization.Tokenizer(stemmer=stemmer, stopwords='en')
+    if INDEX_DIR.exists():
+        print("[+] Loading cached BM25s index…")
+        retriever = bm25s.BM25.load(INDEX_DIR, mmap=True, load_corpus=True)
+        tokenizer.load_vocab(INDEX_DIR)
+        tokenizer.load_stopwords(INDEX_DIR)
+        return retriever.corpus, tokenizer, retriever
+
+    print("[+] Building BM25s index (first run — please wait)…")
+    corpus = list(_iter_products(limit))
+    texts = [d["text"] for d in corpus]
+
+    tokens = tokenizer.tokenize(texts)
+    retriever = bm25s.BM25(corpus=corpus, backend="numba")
+    retriever.index(tokens)
+    retriever.vocab_dict = {str(k): v for k, v in retriever.vocab_dict.items()}
+
+    INDEX_DIR.mkdir(parents=True, exist_ok=True)
+    retriever.save(INDEX_DIR, corpus=corpus)
+    tokenizer.save_vocab(INDEX_DIR)
+    tokenizer.save_stopwords(INDEX_DIR)
+    print(f"[✓] Saved index ({len(corpus):,} docs) → {INDEX_DIR}")
+    return corpus, tokenizer, retriever
+
+
+def _build_or_load_vector_index(corpus: List[Dict[str, str]]):
+    """Load or build FAISS index with BGE embeddings."""
+    if (VEC_DIR / "index.faiss").exists():
+        print("[+] Loading cached FAISS vector index…")
+        index = faiss.read_index(str(VEC_DIR / "index.faiss"))
+        id_map = json.loads((VEC_DIR / "id_map.json").read_text())
+        model = SentenceTransformer(EMBED_MODEL_NAME)
+        return index, id_map, model
+
+    print("[+] Building FAISS vector index (first run — please wait)…")
+    model = SentenceTransformer(EMBED_MODEL_NAME, device=DEVICE)
+    model.max_seq_length = 512
+    texts = [d["text"] for d in corpus]
+
+    # Embed in batches to avoid OOM
+    embeddings = []
+    for i in tqdm(range(0, len(texts), 256), desc="Embedding"):
+        batch_emb = model.encode(texts[i:i+256], show_progress_bar=False, normalize_embeddings=True)
+        embeddings.append(batch_emb)
+    embeddings = np.vstack(embeddings).astype('float32')
+
+    # Build FAISS index (inner product on unit vectors == cosine sim)
+    index = faiss.IndexFlatIP(EMBED_DIM)
+    index.add(embeddings)
+
+    # Persist
+    VEC_DIR.mkdir(parents=True, exist_ok=True)
+    faiss.write_index(index, str(VEC_DIR / "index.faiss"))
+    (VEC_DIR / "id_map.json").write_text(json.dumps([d["id"] for d in corpus]))
+    print(f"[✓] Saved FAISS index ({len(corpus):,} vectors) → {VEC_DIR}")
+    return index, [d["id"] for d in corpus], model
+
+def bm25_search(query: str, idx_tuple, k: int) -> List[Tuple[str, str, float]]:
+    _, tok, ret = idx_tuple
+    q_tokens = tok.tokenize([query], update_vocab=False)
+    docs_mat, scores_mat = ret.retrieve(q_tokens, k=k)
+    docs, scores = docs_mat[0], scores_mat[0]
+    return [(d["id"], d["text"], float(s)) for d, s in zip(docs, scores)]
+
+
+def semantic_search(query: str, vec_tuple, k: int) -> List[Tuple[str, float]]:
+    index, id_map, model = vec_tuple
+    q_emb = model.encode([query], normalize_embeddings=True)[0].astype('float32')
+    scores, idxs = index.search(q_emb[None, :], k)
+    return [(id_map[int(i)], float(s)) for i, s in zip(idxs[0], scores[0])]
+
+
+def hybrid_search(query: str, idx_tuple, vec_tuple, k: int, w: float = HYBRID_WEIGHT):
+    # Retrieve from each modality
+    bm25_hits = bm25_search(query, idx_tuple, k=k*SEM_K_FACTOR)
+    sem_hits = semantic_search(query, vec_tuple, k=k*SEM_K_FACTOR)
+
+    # Build score dicts
+    bm25_dict = {pid: s for pid, _, s in bm25_hits}
+    sem_dict = {pid: s for pid, s in sem_hits}
+
+    # Normalise scores [0,1] within each modality
+    if bm25_dict:
+        bm_min, bm_max = min(bm25_dict.values()), max(bm25_dict.values())
+    else:
+        bm_min = bm_max = 0
+    if sem_dict:
+        sm_min, sm_max = min(sem_dict.values()), max(sem_dict.values())
+    else:
+        sm_min = sm_max = 0
+
+    def norm(val, vmin, vmax):
+        return 0.0 if vmax == vmin else (val - vmin) / (vmax - vmin)
+
+    # Union of document ids
+    docs_all = set(bm25_dict) | set(sem_dict)
+
+    # Compute hybrid score
+    scored_docs = []
+    for pid in docs_all:
+        bm = norm(bm25_dict.get(pid, bm_min), bm_min, bm_max)
+        sm = norm(sem_dict.get(pid, sm_min), sm_min, sm_max)
+        hybrid = w * bm + (1 - w) * sm
+        scored_docs.append((pid, hybrid))
+
+    # Sort by hybrid score desc
+    scored_docs.sort(key=lambda x: x[1], reverse=True)
+
+    # Retrieve full text for top‑k
+    corpus, _, _ = idx_tuple
+    id_to_text = {d["id"]: d["text"] for d in corpus}
+    topk = [(
+        pid,
+        id_to_text.get(pid, ""),
+        score,
+    ) for pid, score in scored_docs[:k]]
+    return topk
+
+
+# ──────────────────────────────────────────────────
+# ❶ 초기 질문 ‑> 검색용 쿼리로 ‘재작성’
+# ──────────────────────────────────────────────────
+REWRITE_PROMPT = PromptTemplate(
+    input_variables=["user_input"],
+    template=(
+        "You are an expert e‑commerce search assistant.\n\n"
+        "Rewrite the user's input as a short, precise search query.\n"
+        "If the input is already an optimal search query, return it unchanged.\n\n"
+        "User: {user_input}\n"
+        "Search‑query:"
+    )
+)
+def rewrite_query(llm: ChatOpenAI, user_input: str) -> str:
+    return llm.invoke(REWRITE_PROMPT.format(user_input=user_input)).content.strip()
+
+def human_rewrite_query(llm, user_input):
+    print(f"User Simulator gave you the input: {user_input}")
+    print("How would you rewrite the query?")
+    human_rewrite_initial_query = input("Enter: ")
+    return human_rewrite_initial_query
+
+# ──────────────────────────────────────────────────
+# ❷ 대화 이력 + 새 답변 -> ‘재구성된 쿼리’ 생성
+# ──────────────────────────────────────────────────
+REFORM_PROMPT = PromptTemplate(
+    input_variables=["history"],
+    template=(
+        "As an e-commerce product search agent, you are refining a product‑search query.\n\n"
+        "Conversation so far:\n{history}\n\n"
+        "Compose ONE refined search query that captures all constraints implicitly "
+        "or explicitly found in the conversation. Return ONLY the query."
+    )
+)
+def reformulate_query(llm: ChatOpenAI, turns: list[list[str, str, str]]) -> str:
+    """turns = [(question, answer), ...]"""
+    history_txt = "\n".join(f"{turn[0]}\n{turn[1]}\n{turn[2]}" for turn in turns)
+    return llm.invoke(REFORM_PROMPT.format(history=history_txt)).content.strip()
+
+def human_reformulate_query(llm, turns):
+    print("--- Now take a look at the dialogue turns and the user simulator's answer to your disambiguation question ---")
+    print("--- Then reformulate query to improve search ---")
+    for turn, i in enumerate(turns, 1):
+        print(f"--- turn {i} ---")
+        print(f"{turn[0]}\n{turn[1]}\n{turn[2]}")
+    print("-" * 15)
+    print("Now give your reformulated query")
+    human_reformulated_query = input("Enter: ")
+    return human_reformulated_query
+
+# ──────────────────────────────────────────────────
+# ❸ 마지막 iteration: 문서 4개 요약
+# ──────────────────────────────────────────────────
+SUMMARY_PROMPT = PromptTemplate(
+    input_variables=["docs"],
+    template=(
+        "Summarise the following 4 product descriptions in bullet points (≤ 40 words each).\n\n"
+        "{docs}\n\n"
+        "Return exactly 4 bullet points."
+    )
+)
+def summarise_docs(llm: ChatOpenAI, docs: list[tuple[str, str]]) -> str:
+    flat = "\n\n".join(f"[{pid}]\n{text}" for pid, text in docs)
+    return llm.invoke(SUMMARY_PROMPT.format(docs=flat)).content.strip()
+
+
+QUESTION_PROMPT = PromptTemplate(
+    input_variables=["items", "context"],
+    template=(
+        # 역할
+        "You are a helpful product‑search assistant.\n\n"
+        # 컨텍스트 설명
+        "The products listed below were retrieved after considering the entire prior conversation with the user.\n\n"
+        # 상품 목록
+        "Products (id · snippet):\n{items}\n\n"
+        # 대화 맥락
+        "Conversation context:\n{context}\n\n"
+        # 요청
+        "Using BOTH the conversation context and the product list, ask **one** concise follow‑up question "
+        "that will help the user further specify what they want.\n"
+        "• Do **not** recommend any specific item.\n"
+        "• Return **only** the question text.\n"
+        "• Do **not** ask something already answered or obvious from the context.\n\n"
+    ),
+)
+
+def ask_disambiguation(llm: ChatOpenAI, docs, qa_turns):
+    # build product snippets
+    snippets = []
+    for pid, text, _ in docs:
+        # head = " ".join(text.split()[:20]) + (" …" if len(text.split()) > 20 else "")
+        head = text
+        snippets.append(f"{pid} · {head}")
+
+    context =  "None so far." if not qa_turns else "\n".join(f"{turn[0]}\n{turn[1]}\n{turn[2]}" for turn in qa_turns)
+    # history = "None so far." if not prev_qs else "\n".join(f"- {q}" for q in prev_qs)
+    prompt = QUESTION_PROMPT.format(items="\n".join(snippets), context=context)
+    return llm.invoke(prompt).content.strip()
+
+def human_ask_disambiguation(llm, docs, qa_turns):
+    print("--- below is the product information ---")
+    print("--- read the information carefully and ask a wise disambiguation question for user simulator ---")
+    for _, text, _ in docs:
+        print(text)
+        print('-' * 15)
+    print("--- Now give your disambiguation question for user simulator ---")
+    human_disambiguation_question = input("Enter: ")
+    return human_disambiguation_question
+
+#### main loop
+
+
+def conversational_search(meta, bm25_idx, vec_idx, llm):
+    """
+    If `meta` is passed, the function runs in *simulation‑evaluation* mode
+    (using `user_simulator`)
+    If `meta` is None, it falls back to a normal interactive chat.
+
+    Parameters
+    ----------
+    meta : dict | None
+        Sample metadata for simulated user; set to None for interactive use.
+    """   
+    # ──────────────────────────────
+    # Simulation vs. Interactive I/O
+    # ──────────────────────────────
+    if meta is not None:                               # simulation‑evaluation
+        user_sim   = user_simulator(meta=meta, llm=llm)
+        raw_input  = user_sim.initial_ambiguous_query()
+    else:                                              # interactive
+        print("=== Hybrid Conversational Product‑Search ===")
+        raw_input = input("You: ").strip()
+        if not raw_input or raw_input == "/exit":
+            return
+
+    # ㊁ Generation‑1: 초기 쿼리 재작성
+    # search_query = rewrite_query(llm, raw_input)
+    search_query = human_rewrite_query(llm, raw_input)
+    # print(f"[ rewritten‑query ] → {search_query}")
+
+    # 대화 이력
+    qa_turns: list[list[str, str, str]] = []
+
+    qa_turns.append(["User's initial search input: " + raw_input, "Human Agent's rewritten search query for product search: " + search_query , ""])
+
+    for round_idx, k in enumerate(TOP_KS, start=1):
+
+        # Retrieval
+        hits = hybrid_search(search_query, bm25_idx, vec_idx, k)
+
+        # ★ 평가(시뮬레이션 전용)
+        if meta is not None:
+            user_sim.eval_retrieval(hits, k) # per-turn evaluation
+
+        # Generation: Clarifying question
+        # question = ask_disambiguation(llm, hits, qa_turns)
+        question = human_ask_disambiguation(llm, hits, qa_turns)
+
+        # ───── 마지막 라운드 or [END] 처리
+        if question == "[END]" or round_idx == len(TOP_KS):
+            r, rr = user_sim.get_result()
+            return r, rr, qa_turns
+
+        # ───── 일반 라운드 처리 (대화 이어가기)
+        # print(f"Agent: {question}")
+        if meta is not None:
+            answer = user_sim.answer_clarification_question(question)
+            # print(f"You (sim): {answer}")
+        else:
+            answer = input("You: ").strip()
+
+        qa_turns.append(['Human Agent: ' + question, 'User: ' + answer, ''])
+
+        # search_query = reformulate_query(llm, qa_turns)
+        search_query = human_reformulate_query(llm, qa_turns)
+
+        qa_turns[-1][2] = '>>> Human Agent reformulated the search query to: ' + search_query
+
+        # print(f"[ refined‑query ] → {search_query}\n")
+
+
+# ─────────────────────────────────────────────────────────
+# 1) 메타 파일들을 읽어 들여 리스트로 반환
+# ─────────────────────────────────────────────────────────
+def _load_jsonl(path: Path) -> list[dict]:
+    """jsonl 파일을 모두 읽어 meta 객체 리스트로 반환"""
+    metas = []
+    with open(path, "r", encoding="utf‑8") as f:
+        for line in f:
+            metas.append(json.loads(line))
+    metas = metas[EVAL_START_IDX: EVAL_END_IDX + 1]
+    return metas
+
+
+# ─────────────────────────────────────────────────────────
+# 2) conversational_search() 를 각 meta 에 대해 호출
+# ─────────────────────────────────────────────────────────
+def batch_evaluate():
+    bm25_idx = _build_or_load_bm25_index(MAX_PRODUCTS)
+    vec_idx  = _build_or_load_vector_index(bm25_idx[0])
+    llm      = ChatOpenAI(model_name=MODEL_NAME,
+                          temperature=TEMPERATURE,
+                          streaming=True)
+
+    dialogue_history = [] # collect all dialogue histories
+
+    eval_data_paths = [
+        Path(BASE_DIR / "sample_data" / "toy_sample.jsonl"),
+        # Path("./PSA/sample_data/cellphone_sample.jsonl"),
+    ]
+
+
+    for path in eval_data_paths:
+        metas = _load_jsonl(path)
+        set_name = path.stem
+        print(f"\n========== {set_name} ({len(metas)} samples) ==========")
+
+        # 누적용 버퍼
+        retrieval_results_all   = []   # [[hit@10_turn1, hit@10_turn2, ...], ...]
+        reciprocal_ranks_all    = []   # [[rr_turn1, rr_turn2, ...], ...]
+
+        for meta in tqdm(metas, desc=set_name):
+            r, rr, qa_turns = conversational_search(meta,bm25_idx,vec_idx,llm)   # ← 반환값 받기
+            retrieval_results_all.append(r)
+            reciprocal_ranks_all.append(rr)
+            dialogue_history.append(qa_turns)
+
+        # ---- 전체 샘플 집계 ----
+        lengths, hit_at_k_per_turn, mrr_per_turn = accumulate_retrieval_result(
+            retrieval_results_all, reciprocal_ranks_all
+        )
+
+        print("\n===== Mean performance across all samples =====")
+        for turn_idx, (hit, mrr) in enumerate(zip(hit_at_k_per_turn, mrr_per_turn), 1):
+            print(f"Turn {turn_idx}:  Hit@10 = {hit:.4f}   |   MRR@10 = {mrr:.4f}")
+            
+        # write the performance into output file
+        output_path = Path(f"performance_HUMAN_{set_name}.json")
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "hit_at_k_per_turn": hit_at_k_per_turn,
+                "mrr_per_turn": mrr_per_turn
+            }, f, ensure_ascii=False, indent=4)
+        print(f"Performance stats saved to {output_path}")        
+            
+        # write the dialogue history into output file for GPT-as-a-judge evaluation
+        output_path = Path(f"dialogue_history_HUMAN_{set_name}.jsonl")
+        with open(output_path, "w", encoding="utf-8") as f:
+            for item in dialogue_history:
+                f.write(json.dumps(item, ensure_ascii=False) + "\n")
+        print(f"Dialogue history saved to {output_path}")
+        
+
+# ─────────────────────────────────────────────────────────
+# 3) 스크립트 진입점
+# ─────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    batch_evaluate()
+
