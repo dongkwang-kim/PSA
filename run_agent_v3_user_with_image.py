@@ -27,8 +27,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 warnings.filterwarnings('ignore')
 from datasets import load_dataset
 from collections import defaultdict
-
-load_dotenv()
+import re
 
 MODEL_NAME = "gpt-4.1-mini"
 TEMPERATURE = 0.2
@@ -58,6 +57,41 @@ MODEL_PRICING = {
 # 이미지 최대 해상도 설정
 MAX_IMAGE_WIDTH = 576
 MAX_IMAGE_HEIGHT = 1024
+
+PHONE_RE = re.compile(r"\b\d{3}-\d{3,4}-\d{4}\b")
+EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+
+with open("util_data/list_of_dirty_words.txt", "r", encoding='utf-8') as f:
+    dirty_words = [w.strip() for w in f if w.strip()]
+
+dirty_patterns = re.compile(
+    r'\b(?:' + '|'.join(map(re.escape, dirty_words)) + r')\b',
+    re.IGNORECASE
+)
+
+# ─────────────────────────────────────────────────────────
+# Safety Checks
+# ─────────────────────────────────────────────────────────
+
+FORBIDDEN_PATTERNS = [
+    PHONE_RE,                     # 전화번호 패턴
+    EMAIL_RE,                     # 이메일
+    dirty_patterns,              # 욕설/비속어 (실제 리스트로 대체)
+]
+
+def is_safe_user_input(text):
+    for pat in FORBIDDEN_PATTERNS:
+        if re.search(pat, text, re.IGNORECASE):
+            return False
+    return True
+
+def is_safe_llm_output(text):
+    for pat in FORBIDDEN_PATTERNS:
+        if re.search(pat, text, re.IGNORECASE):
+            return False
+    return True
+
+# ─────────────────────────────────────────────────────────
 
 
 def _iter_products(limit: int | None = None):
@@ -325,7 +359,12 @@ def conversational_search():
                           streaming=True)
 
     print("=== Hybrid Conversational Product‑Search ===")
+    print("Caution: Do NOT enter any personal information (e.g., name, phone number, email).")
     raw_input = input("You: ").strip()
+    if not is_safe_user_input(raw_input):
+        print("[!] Terminate session: unsafe user input detected.")
+        return
+    
     if not raw_input or raw_input == "/exit":
         return
 
@@ -349,7 +388,6 @@ def conversational_search():
         if question == "[END]" or round_idx == len(TOP_KS):
             #   ↳ 마지막 iteration: 문서 4개 요약 후 종료
             final_hits = hybrid_search(search_query, bm25_idx, vec_idx, 4)
-
 
             pids = [pid for pid, _, _ in final_hits]   # keep order if you like
             images_by_pid = fetch_images_for_pids(pids)
@@ -437,6 +475,10 @@ def conversational_search():
         # User prompt ↔ answer 수집
         print(f"Agent: {question}")
         answer = input("You: ").strip()
+
+        if not is_safe_user_input(answer):
+            print("[!] Terminate session: unsafe user input detected.")
+            return
 
         qa_turns.append((question, answer))
         # Generation: 대화 이력 기반 쿼리 재구성

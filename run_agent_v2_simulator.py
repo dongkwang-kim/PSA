@@ -22,6 +22,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 warnings.filterwarnings('ignore')
 from collections import defaultdict
 from user_simulator import user_simulator, accumulate_retrieval_result
+import re
 
 
 load_dotenv()
@@ -39,6 +40,35 @@ EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 EMBED_DIM = 384
 
 DEVICE = "cuda"
+
+PHONE_RE = re.compile(r"\b\d{3}-\d{3,4}-\d{4}\b")
+EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+
+with open("util_data/list_of_dirty_words.txt", "r", encoding='utf-8') as f:
+    dirty_words = [w.strip() for w in f if w.strip()]
+
+dirty_patterns = re.compile(
+    r'\b(?:' + '|'.join(map(re.escape, dirty_words)) + r')\b',
+    re.IGNORECASE
+)
+
+FORBIDDEN_PATTERNS = [
+    PHONE_RE,                     # 전화번호 패턴
+    EMAIL_RE,                     # 이메일
+    dirty_patterns,              # 욕설/비속어 (실제 리스트로 대체)
+]
+
+def is_safe_user_input(text):
+    for pat in FORBIDDEN_PATTERNS:
+        if re.search(pat, text, re.IGNORECASE):
+            return False
+    return True
+
+def is_safe_llm_output(text):
+    for pat in FORBIDDEN_PATTERNS:
+        if re.search(pat, text, re.IGNORECASE):
+            return False
+    return True
 
 
 def _iter_products(limit: int | None = None):
@@ -231,15 +261,15 @@ def rewrite_query(llm: ChatOpenAI, user_input: str) -> str:
 REFORM_PROMPT = PromptTemplate(
     input_variables=["history"],
     template=(
-        "You are refining a product‑search query.\n\n"
+        "As an e-commerce product search agent, you are refining a product‑search query.\n\n"
         "Conversation so far:\n{history}\n\n"
         "Compose ONE refined search query that captures all constraints implicitly "
         "or explicitly found in the conversation. Return ONLY the query."
     )
 )
-def reformulate_query(llm: ChatOpenAI, turns: list[tuple[str, str]]) -> str:
+def reformulate_query(llm: ChatOpenAI, turns: list[list[str, str, str]]) -> str:
     """turns = [(question, answer), ...]"""
-    history_txt = "\n".join(f"Q: {q}\nA: {a}" for q, a in turns)
+    history_txt = "\n".join(f"{turn[0]}\n{turn[1]}\n{turn[2]}" for turn in turns)
     return llm.invoke(REFORM_PROMPT.format(history=history_txt)).content.strip()
 
 
@@ -287,7 +317,7 @@ def ask_disambiguation(llm: ChatOpenAI, docs, qa_turns):
         head = text
         snippets.append(f"{pid} · {head}")
 
-    context =  "None so far." if not qa_turns else "\n".join(f"Q: {turn[0]} A: {turn[1]}" for turn in qa_turns)
+    context =  "None so far." if not qa_turns else "\n".join(f"{turn[0]}\n{turn[1]}\n{turn[2]}" for turn in qa_turns)
     # history = "None so far." if not prev_qs else "\n".join(f"- {q}" for q in prev_qs)
     prompt = QUESTION_PROMPT.format(items="\n".join(snippets), context=context)
     return llm.invoke(prompt).content.strip()
@@ -306,9 +336,7 @@ def conversational_search(meta, bm25_idx, vec_idx, llm):
     ----------
     meta : dict | None
         Sample metadata for simulated user; set to None for interactive use.
-    """
-    dialogue_history_single_item = dict() # we collect dialogue history from conversational search of the current item
-    
+    """   
     # ──────────────────────────────
     # Simulation vs. Interactive I/O
     # ──────────────────────────────
@@ -325,11 +353,10 @@ def conversational_search(meta, bm25_idx, vec_idx, llm):
     search_query = rewrite_query(llm, raw_input)
     # print(f"[ rewritten‑query ] → {search_query}")
 
-    dialogue_history_single_item['initial_query'] = raw_input
-    dialogue_history_single_item['rewritten_initial_query'] = search_query
-
     # 대화 이력
-    qa_turns: list[tuple[str, str]] = []
+    qa_turns: list[list[str, str, str]] = []
+
+    qa_turns.append(["User's initial search input: " + raw_input, "Agent's rewritten search query for product search: " + search_query , ""])
 
     for round_idx, k in enumerate(TOP_KS, start=1):
 
@@ -346,8 +373,7 @@ def conversational_search(meta, bm25_idx, vec_idx, llm):
         # ───── 마지막 라운드 or [END] 처리
         if question == "[END]" or round_idx == len(TOP_KS):
             r, rr = user_sim.get_result()
-            dialogue_history_single_item['qa_turns'] = qa_turns
-            return r, rr, dialogue_history_single_item
+            return r, rr, qa_turns
 
         # ───── 일반 라운드 처리 (대화 이어가기)
         # print(f"Agent: {question}")
@@ -357,8 +383,12 @@ def conversational_search(meta, bm25_idx, vec_idx, llm):
         else:
             answer = input("You: ").strip()
 
-        qa_turns.append((question, answer))
+        qa_turns.append(['Agent: ' + question, 'User: ' + answer, ''])
+
         search_query = reformulate_query(llm, qa_turns)
+
+        qa_turns[-1][2] = '>>> Agent reformulated the search query to: ' + search_query
+
         # print(f"[ refined‑query ] → {search_query}\n")
 
 
@@ -391,6 +421,7 @@ def batch_evaluate():
         # Path("./PSA/sample_data/cellphone_sample.jsonl"),
     ]
 
+
     for path in eval_data_paths:
         metas = _load_jsonl(path)
         set_name = path.stem
@@ -401,10 +432,10 @@ def batch_evaluate():
         reciprocal_ranks_all    = []   # [[rr_turn1, rr_turn2, ...], ...]
 
         for meta in tqdm(metas, desc=set_name):
-            r, rr, dialogue_history_single_item = conversational_search(meta,bm25_idx,vec_idx,llm)   # ← 반환값 받기
+            r, rr, qa_turns = conversational_search(meta,bm25_idx,vec_idx,llm)   # ← 반환값 받기
             retrieval_results_all.append(r)
             reciprocal_ranks_all.append(rr)
-            dialogue_history.append(dialogue_history_single_item)
+            dialogue_history.append(qa_turns)
 
         # ---- 전체 샘플 집계 ----
         lengths, hit_at_k_per_turn, mrr_per_turn = accumulate_retrieval_result(
@@ -416,6 +447,11 @@ def batch_evaluate():
             print(f"Turn {turn_idx}:  Hit@10 = {hit:.4f}   |   MRR@10 = {mrr:.4f}")
             
         # write the dialogue history into output file for GPT-as-a-judge evaluation
+        output_path = Path(f"dialogue_history_{set_name}.jsonl")
+        with open(output_path, "w", encoding="utf-8") as f:
+            for item in dialogue_history:
+                f.write(json.dumps(item, ensure_ascii=False) + "\n")
+        print(f"Dialogue history saved to {output_path}")
         
 
 # ─────────────────────────────────────────────────────────
