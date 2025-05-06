@@ -21,21 +21,23 @@ class user_simulator:
             input_variables=["meta"],
             template=(
                 "You are a user who is looking for a product on an e-commerce website such as Amazon. "
-                "You probably know what you want, but you are not sure about the exact name or description. "
-                "Although you are given the full name of the product, you cannot return it as the query. "
+                "You probably know what you want, but you are not sure about the exact name or full description. "
                 "Your job is to generate a query that is still ambiguous, but contains key partial information about the wanted item. "
                 "This resembles a real user query that is not too specific and does not contain the full name of the product. "
                 "For example, if the product is a 'Samsung Galaxy S21 silver smartphone with 128GB storage', "
                 "you may return 'Galaxy S21' or 'Samsung smartphone' for example. "
-                "you may use the product title and some features(if any) to generate the query, which is at most two to five words. "
+                "You may use the product title and some features(if any) provided to generate the query "
+                "Although you are given the full name of the product, you cannot return it as the query. "
                 "The product title is {meta[title]} and the features are {meta[features]} and {meta[description]}. "
+                "Your generated initial query must be a natural sentence or short phrase that summarizes what you want. "
+                "Try your best to mimic how a human user would begin search in such semi-uncertain situation."
                 "Please return the query in a single line without any additional text or explanation. "
-                "The query should be a short phrase(2-5 words) and should not contain punctuation or special characters. "
+                "Query: "
             ),
         )
         # generate the query
         ambiguous_query = ambiguous_query_prompt.format(meta=self.meta)
-        return ambiguous_query
+        return self.llm.invoke(ambiguous_query).content.strip()
 
     def answer_clarification_question(self, question_str):
         """
@@ -58,7 +60,7 @@ class user_simulator:
         answer = answer_clarification_question_prompt.format(
             meta=self.meta, question=question_str
         )
-        return answer
+        return self.llm.invoke(answer).content.strip()
 
     def eval_retrieval(self, retrieved_items, k=10):
         """

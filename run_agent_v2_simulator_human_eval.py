@@ -29,6 +29,9 @@ import re
 
 load_dotenv()
 
+EVAL_START_IDX = 0
+EVAL_END_IDX = 49
+
 MODEL_NAME = "gpt-4.1-mini"
 TEMPERATURE = 0.2
 # INDEX_DIR = Path("toys_bm25s_index")
@@ -257,6 +260,11 @@ REWRITE_PROMPT = PromptTemplate(
 def rewrite_query(llm: ChatOpenAI, user_input: str) -> str:
     return llm.invoke(REWRITE_PROMPT.format(user_input=user_input)).content.strip()
 
+def human_rewrite_query(llm, user_input):
+    print(f"User Simulator gave you the input: {user_input}")
+    print("How would you rewrite the query?")
+    human_rewrite_initial_query = input("Enter: ")
+    return human_rewrite_initial_query
 
 # ──────────────────────────────────────────────────
 # ❷ 대화 이력 + 새 답변 -> ‘재구성된 쿼리’ 생성
@@ -275,6 +283,16 @@ def reformulate_query(llm: ChatOpenAI, turns: list[list[str, str, str]]) -> str:
     history_txt = "\n".join(f"{turn[0]}\n{turn[1]}\n{turn[2]}" for turn in turns)
     return llm.invoke(REFORM_PROMPT.format(history=history_txt)).content.strip()
 
+def human_reformulate_query(llm, turns):
+    print("--- Now take a look at the dialogue turns and the user simulator's answer to your disambiguation question ---")
+    print("--- Then reformulate query to improve search ---")
+    for turn, i in enumerate(turns, 1):
+        print(f"--- turn {i} ---")
+        print(f"{turn[0]}\n{turn[1]}\n{turn[2]}")
+    print("-" * 15)
+    print("Now give your reformulated query")
+    human_reformulated_query = input("Enter: ")
+    return human_reformulated_query
 
 # ──────────────────────────────────────────────────
 # ❸ 마지막 iteration: 문서 4개 요약
@@ -325,6 +343,15 @@ def ask_disambiguation(llm: ChatOpenAI, docs, qa_turns):
     prompt = QUESTION_PROMPT.format(items="\n".join(snippets), context=context)
     return llm.invoke(prompt).content.strip()
 
+def human_ask_disambiguation(llm, docs, qa_turns):
+    print("--- below is the product information ---")
+    print("--- read the information carefully and ask a wise disambiguation question for user simulator ---")
+    for _, text, _ in docs:
+        print(text)
+        print('-' * 15)
+    print("--- Now give your disambiguation question for user simulator ---")
+    human_disambiguation_question = input("Enter: ")
+    return human_disambiguation_question
 
 #### main loop
 
@@ -353,13 +380,14 @@ def conversational_search(meta, bm25_idx, vec_idx, llm):
             return
 
     # ㊁ Generation‑1: 초기 쿼리 재작성
-    search_query = rewrite_query(llm, raw_input)
+    # search_query = rewrite_query(llm, raw_input)
+    search_query = human_rewrite_query(llm, raw_input)
     # print(f"[ rewritten‑query ] → {search_query}")
 
     # 대화 이력
     qa_turns: list[list[str, str, str]] = []
 
-    qa_turns.append(["User's initial search input: " + raw_input, "Agent's rewritten search query for product search: " + search_query , ""])
+    qa_turns.append(["User's initial search input: " + raw_input, "Human Agent's rewritten search query for product search: " + search_query , ""])
 
     for round_idx, k in enumerate(TOP_KS, start=1):
 
@@ -371,7 +399,8 @@ def conversational_search(meta, bm25_idx, vec_idx, llm):
             user_sim.eval_retrieval(hits, k) # per-turn evaluation
 
         # Generation: Clarifying question
-        question = ask_disambiguation(llm, hits, qa_turns)
+        # question = ask_disambiguation(llm, hits, qa_turns)
+        question = human_ask_disambiguation(llm, hits, qa_turns)
 
         # ───── 마지막 라운드 or [END] 처리
         if question == "[END]" or round_idx == len(TOP_KS):
@@ -386,11 +415,12 @@ def conversational_search(meta, bm25_idx, vec_idx, llm):
         else:
             answer = input("You: ").strip()
 
-        qa_turns.append(['Agent: ' + question, 'User: ' + answer, ''])
+        qa_turns.append(['Human Agent: ' + question, 'User: ' + answer, ''])
 
-        search_query = reformulate_query(llm, qa_turns)
+        # search_query = reformulate_query(llm, qa_turns)
+        search_query = human_reformulate_query(llm, qa_turns)
 
-        qa_turns[-1][2] = '>>> Agent reformulated the search query to: ' + search_query
+        qa_turns[-1][2] = '>>> Human Agent reformulated the search query to: ' + search_query
 
         # print(f"[ refined‑query ] → {search_query}\n")
 
@@ -404,6 +434,7 @@ def _load_jsonl(path: Path) -> list[dict]:
     with open(path, "r", encoding="utf‑8") as f:
         for line in f:
             metas.append(json.loads(line))
+    metas = metas[EVAL_START_IDX: EVAL_END_IDX + 1]
     return metas
 
 
@@ -450,7 +481,7 @@ def batch_evaluate():
             print(f"Turn {turn_idx}:  Hit@10 = {hit:.4f}   |   MRR@10 = {mrr:.4f}")
             
         # write the performance into output file
-        output_path = Path(f"performance_{set_name}.json")
+        output_path = Path(f"performance_HUMAN_{set_name}.json")
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump({
                 "hit_at_k_per_turn": hit_at_k_per_turn,
@@ -459,7 +490,7 @@ def batch_evaluate():
         print(f"Performance stats saved to {output_path}")        
             
         # write the dialogue history into output file for GPT-as-a-judge evaluation
-        output_path = Path(f"dialogue_history_{set_name}.jsonl")
+        output_path = Path(f"dialogue_history_HUMAN_{set_name}.jsonl")
         with open(output_path, "w", encoding="utf-8") as f:
             for item in dialogue_history:
                 f.write(json.dumps(item, ensure_ascii=False) + "\n")
