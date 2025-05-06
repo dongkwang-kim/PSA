@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 from __future__ import annotations
 
 
@@ -30,6 +32,7 @@ load_dotenv()
 MODEL_NAME = "gpt-4.1-mini"
 TEMPERATURE = 0.2
 # INDEX_DIR = Path("toys_bm25s_index")
+BASE_DIR = Path(__file__).parent
 INDEX_DIR = Path("toys_bm25s_index")
 VEC_DIR = Path("toys_faiss")
 TOP_KS = [10, 10, 10, 10]        # pool sizes per round
@@ -44,7 +47,7 @@ DEVICE = "cuda"
 PHONE_RE = re.compile(r"\b\d{3}-\d{3,4}-\d{4}\b")
 EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 
-with open("util_data/list_of_dirty_words.txt", "r", encoding='utf-8') as f:
+with open(BASE_DIR / 'util_data' / 'list_of_dirty_words.txt', "r", encoding='utf-8') as f:
     dirty_words = [w.strip() for w in f if w.strip()]
 
 dirty_patterns = re.compile(
@@ -417,7 +420,7 @@ def batch_evaluate():
     dialogue_history = [] # collect all dialogue histories
 
     eval_data_paths = [
-        Path("./sample_data/toy_sample.jsonl"),
+        Path(BASE_DIR / "sample_data" / "toy_sample.jsonl"),
         # Path("./PSA/sample_data/cellphone_sample.jsonl"),
     ]
 
@@ -446,6 +449,15 @@ def batch_evaluate():
         for turn_idx, (hit, mrr) in enumerate(zip(hit_at_k_per_turn, mrr_per_turn), 1):
             print(f"Turn {turn_idx}:  Hit@10 = {hit:.4f}   |   MRR@10 = {mrr:.4f}")
             
+        # write the performance into output file
+        output_path = Path(f"performance_{set_name}.json")
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "hit_at_k_per_turn": hit_at_k_per_turn,
+                "mrr_per_turn": mrr_per_turn
+            }, f, ensure_ascii=False, indent=4)
+        print(f"Performance stats saved to {output_path}")        
+            
         # write the dialogue history into output file for GPT-as-a-judge evaluation
         output_path = Path(f"dialogue_history_{set_name}.jsonl")
         with open(output_path, "w", encoding="utf-8") as f:
@@ -458,9 +470,5 @@ def batch_evaluate():
 # 3) 스크립트 진입점
 # ─────────────────────────────────────────────────────────
 if __name__ == "__main__":
-   
-    bm25_idx = _build_or_load_bm25_index(MAX_PRODUCTS)
-    vec_idx  = _build_or_load_vector_index(bm25_idx[0])
-
-    # batch_evaluate()
+    batch_evaluate()
 
