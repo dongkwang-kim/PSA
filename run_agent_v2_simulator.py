@@ -231,8 +231,8 @@ REFORM_PROMPT = PromptTemplate(
     template=(
         "You are refining a product‑search query.\n\n"
         "Conversation so far:\n{history}\n\n"
-        "Compose ONE refined search query that captures all constraints implicit "
-        "or explicit in the conversation. Return ONLY the query."
+        "Compose ONE refined search query that captures all constraints implicitly "
+        "or explicitly found in the conversation. Return ONLY the query."
     )
 )
 def reformulate_query(llm: ChatOpenAI, turns: list[tuple[str, str]]) -> str:
@@ -297,8 +297,7 @@ def ask_disambiguation(llm: ChatOpenAI, docs, qa_turns):
 def conversational_search(meta, bm25_idx, vec_idx, llm):
     """
     If `meta` is passed, the function runs in *simulation‑evaluation* mode
-    (using `user_simulator`) and prints Hit@10 / MRR@10 per turn, exactly
-    like `eval_loop()` used to do.  
+    (using `user_simulator`)
     If `meta` is None, it falls back to a normal interactive chat.
 
     Parameters
@@ -306,6 +305,8 @@ def conversational_search(meta, bm25_idx, vec_idx, llm):
     meta : dict | None
         Sample metadata for simulated user; set to None for interactive use.
     """
+    dialogue_history_single_item = dict() # we collect dialogue history from conversational search of the current item
+    
     # ──────────────────────────────
     # Simulation vs. Interactive I/O
     # ──────────────────────────────
@@ -322,6 +323,9 @@ def conversational_search(meta, bm25_idx, vec_idx, llm):
     search_query = rewrite_query(llm, raw_input)
     # print(f"[ rewritten‑query ] → {search_query}")
 
+    dialogue_history_single_item['initial_query'] = raw_input
+    dialogue_history_single_item['rewritten_initial_query'] = search_query
+
     # 대화 이력
     qa_turns: list[tuple[str, str]] = []
 
@@ -332,7 +336,7 @@ def conversational_search(meta, bm25_idx, vec_idx, llm):
 
         # ★ 평가(시뮬레이션 전용)
         if meta is not None:
-            user_sim.eval_retrieval(hits, k)
+            user_sim.eval_retrieval(hits, k) # per-turn evaluation
 
         # Generation: Clarifying question
         question = ask_disambiguation(llm, hits, qa_turns)
@@ -340,7 +344,8 @@ def conversational_search(meta, bm25_idx, vec_idx, llm):
         # ───── 마지막 라운드 or [END] 처리
         if question == "[END]" or round_idx == len(TOP_KS):
             r, rr = user_sim.get_result()
-            return r, rr
+            dialogue_history_single_item['qa_turns'] = qa_turns
+            return r, rr, dialogue_history_single_item
 
         # ───── 일반 라운드 처리 (대화 이어가기)
         # print(f"Agent: {question}")
@@ -353,8 +358,6 @@ def conversational_search(meta, bm25_idx, vec_idx, llm):
         qa_turns.append((question, answer))
         search_query = reformulate_query(llm, qa_turns)
         # print(f"[ refined‑query ] → {search_query}\n")
-
-
 
 
 # ─────────────────────────────────────────────────────────
@@ -379,6 +382,7 @@ def batch_evaluate():
                           temperature=TEMPERATURE,
                           streaming=True)
 
+    dialogue_history = [] # collect all dialogue histories
 
     eval_data_paths = [
         Path("./sample_data/toy_sample.jsonl"),
@@ -395,9 +399,10 @@ def batch_evaluate():
         reciprocal_ranks_all    = []   # [[rr_turn1, rr_turn2, ...], ...]
 
         for meta in tqdm(metas, desc=set_name):
-            r, rr = conversational_search(meta,bm25_idx,vec_idx,llm)   # ← 반환값 받기
+            r, rr, dialogue_history_single_item = conversational_search(meta,bm25_idx,vec_idx,llm)   # ← 반환값 받기
             retrieval_results_all.append(r)
             reciprocal_ranks_all.append(rr)
+            dialogue_history.append(dialogue_history_single_item)
 
         # ---- 전체 샘플 집계 ----
         lengths, hit_at_k_per_turn, mrr_per_turn = accumulate_retrieval_result(
@@ -407,6 +412,9 @@ def batch_evaluate():
         print("\n===== Mean performance across all samples =====")
         for turn_idx, (hit, mrr) in enumerate(zip(hit_at_k_per_turn, mrr_per_turn), 1):
             print(f"Turn {turn_idx}:  Hit@10 = {hit:.4f}   |   MRR@10 = {mrr:.4f}")
+            
+        # write the dialogue history into output file for GPT-as-a-judge evaluation
+        
 
 # ─────────────────────────────────────────────────────────
 # 3) 스크립트 진입점

@@ -62,7 +62,7 @@ class user_simulator:
 
     def eval_retrieval(self, retrieved_items, k=10):
         """
-        evaluates the retrieval result
+        evaluates the retrieval result per turn.
         """
         # retrieval_result is a list of tuples, where each tuple contains the id, the description, and the retrieval score
         # we need to first sort the list by the retrieval score
